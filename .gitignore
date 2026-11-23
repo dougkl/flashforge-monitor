@@ -1,0 +1,12 @@
+bin/
+obj/
+publish/
+data/
+.vs/
+.vscode/
+.idea/
+*.user
+*.swp
+# local settings: printer IP, check code, passwords, webhooks
+appsettings.local.json
+appsettings.Development.json

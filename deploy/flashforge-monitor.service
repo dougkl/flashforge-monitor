@@ -1,0 +1,24 @@
+[Unit]
+Description=FlashForge Monitor (web UI for FlashForge Adventurer 5M / 5M Pro)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ffmonitor
+WorkingDirectory=/opt/flashforge-monitor
+ExecStart=/opt/flashforge-monitor/flashforge-monitor
+Restart=always
+RestartSec=5
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Environment=Monitor__DataDirectory=/var/lib/flashforge-monitor
+StateDirectory=flashforge-monitor
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/flashforge-monitor /opt/flashforge-monitor
+
+[Install]
+WantedBy=multi-user.target

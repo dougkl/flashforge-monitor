@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>FlashForge Monitor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='4' y='4' width='24' height='24' rx='4' fill='%234f8f7a'/><rect x='10' y='10' width='12' height='4' fill='%23111418'/><rect x='14' y='14' width='4' height='8' fill='%23111418'/></svg>">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1 id="title">FlashForge Monitor</h1>
+  <span id="online" class="pill">…</span>
+  <span id="state" class="pill">…</span>
+  <span id="activity" class="pill" hidden></span>
+  <span class="meta" id="meta"></span>
+</header>
+<div class="banner" id="setupBanner" hidden>
+  No printer configured. Set <code>Printer:Host</code> in <code>appsettings.local.json</code>
+  or start with <code>FFM_Printer__Host=&lt;printer-ip&gt;</code>.
+</div>
+
+<main>
+  <!-- Camera -->
+  <section class="card span2">
+    <h2>Camera
+      <span class="lanonly"><button data-lan="camera-on">On</button><button data-lan="camera-off">Off</button></span>
+    </h2>
+    <div id="camwrap"><span class="sub" id="camMsg">Camera off or unavailable</span><img id="camimg" alt="" hidden></div>
+  </section>
+
+  <!-- Job -->
+  <section class="card span2">
+    <h2>Job</h2>
+    <div class="row"><div class="big" id="pct">–</div><div class="sub right" id="layer"></div></div>
+    <div class="bar"><div id="barfill"></div></div>
+    <div class="row"><span class="sub ellipsis" id="file">No active print</span><span class="sub" id="eta"></span></div>
+    <div class="btns">
+      <button data-job="pause">⏸ Pause</button>
+      <button data-job="resume">▶ Resume</button>
+      <button data-job="cancel" class="danger">■ Cancel</button>
+      <button data-lan="clear-platform" class="lanonly">Clear platform</button>
+    </div>
+    <div class="sliders">
+      <label>Speed <input type="range" id="speed" min="10" max="200" step="5" value="100"><output id="speedOut">100%</output></label>
+      <label>Flow <input type="range" id="flow" min="50" max="150" step="1" value="100"><output id="flowOut">100%</output></label>
+      <label>Part fan <input type="range" id="fan" min="0" max="100" step="5" value="100"><output id="fanOut">100%</output></label>
+    </div>
+    <div class="sub">Sliders apply when released.</div>
+  </section>
+
+  <!-- Temperatures -->
+  <section class="card">
+    <h2>Nozzle</h2>
+    <div class="big" id="noz">–</div><div class="sub" id="nozT"></div>
+    <div class="setrow"><input type="number" id="nozSet" min="0" max="280" placeholder="°C"><button data-set="nozzle">Set</button><button data-off="nozzle">Off</button></div>
+  </section>
+  <section class="card">
+    <h2>Bed</h2>
+    <div class="big" id="bed">–</div><div class="sub" id="bedT"></div>
+    <div class="setrow"><input type="number" id="bedSet" min="0" max="110" placeholder="°C"><button data-set="bed">Set</button><button data-off="bed">Off</button></div>
+  </section>
+  <section class="card">
+    <h2>Preheat</h2>
+    <div class="btns tight">
+      <button data-pre="210,60">PLA</button>
+      <button data-pre="240,80">PETG</button>
+      <button data-pre="250,100">ABS</button>
+      <button data-pre="230,50">TPU</button>
+      <button data-pre="0,0" class="danger">Cool down</button>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Machine</h2>
+    <div class="btns tight">
+      <button id="lightBtn">💡 Light</button>
+      <button data-ctl="runout/on">Runout on</button>
+      <button data-ctl="runout/off">Runout off</button>
+      <button data-ctl="motors-off">Motors off</button>
+      <button id="estop" class="estop">EMERGENCY STOP</button>
+    </div>
+  </section>
+
+  <!-- Movement -->
+  <section class="card span2">
+    <h2>Move <span class="sub" id="pos"></span></h2>
+    <div class="jogwrap">
+      <div class="jog">
+        <span></span><button data-jog="Y,1">Y+</button><span></span>
+        <button data-jog="X,-1">X−</button><button data-ctl="home" title="Home all axes">⌂</button><button data-jog="X,1">X+</button>
+        <span></span><button data-jog="Y,-1">Y−</button><span></span>
+      </div>
+      <div class="jogz">
+        <button data-jog="Z,1">Z+</button>
+        <button data-jog="Z,-1">Z−</button>
+      </div>
+      <div class="jogopts">
+        <div class="sub">Step (mm)</div>
+        <div class="seg" id="step">
+          <button data-step="0.1">0.1</button><button data-step="1">1</button><button data-step="10" class="on">10</button><button data-step="50">50</button>
+        </div>
+        <div class="sub" style="margin-top:10px">Extruder (needs hot nozzle)</div>
+        <div class="btns tight">
+          <button data-jog="E,1">Extrude</button><button data-jog="E,-1">Retract</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LAN-mode details -->
+  <section class="card span4 lanonly" id="detailCard">
+    <h2>Printer details <span class="sub">(LAN mode)</span>
+      <span><button data-lan="filter-internal">Filter: internal</button><button data-lan="filter-external">external</button><button data-lan="filter-off">off</button></span>
+    </h2>
+    <div class="kv" id="detail"></div>
+  </section>
+
+  <!-- Files -->
+  <section class="card span2">
+    <h2>Send a job</h2>
+    <div class="row left">
+      <label class="filebtn">Choose .gcode / .gx / .3mf<input type="file" id="upfile" accept=".gcode,.gx,.g,.3mf"></label>
+      <span class="sub ellipsis" id="upname">nothing selected</span>
+    </div>
+    <label class="chk"><input type="checkbox" id="printNow" checked> Start printing when uploaded</label>
+    <div class="bar"><div id="upbar"></div></div>
+    <div class="row"><span class="sub" id="upstatus"></span><button id="upbtn" disabled>Upload</button></div>
+  </section>
+
+  <section class="card span2">
+    <h2>Files on printer <button id="refreshFiles">Refresh</button></h2>
+    <ul class="files" id="files"><li class="sub">–</li></ul>
+  </section>
+
+  <!-- Temperature chart -->
+  <section class="card span4">
+    <h2>Temperatures (last hour)</h2>
+    <svg id="chart" viewBox="0 0 600 160" preserveAspectRatio="none"></svg>
+    <div class="legend"><span><i style="background:var(--warm)"></i>Nozzle</span><span><i style="background:var(--accent)"></i>Bed</span></div>
+  </section>
+
+  <!-- History -->
+  <section class="card span2">
+    <h2>Print history <button id="clearHistory" class="danger">Clear</button></h2>
+    <table class="hist"><thead><tr><th>File</th><th>Ended</th><th>Time</th><th>Result</th></tr></thead><tbody id="history"></tbody></table>
+  </section>
+
+  <!-- Console -->
+  <section class="card span2">
+    <h2>Console <span class="sub">raw G-code / M-code</span></h2>
+    <pre id="console"></pre>
+    <form id="consoleForm" class="setrow"><input id="consoleIn" placeholder="e.g. M115" autocomplete="off"><button>Send</button></form>
+    <div class="btns tight">
+      <button data-cmd="M115">M115 info</button><button data-cmd="M119">M119 state</button><button data-cmd="M105">M105 temps</button><button data-cmd="M114">M114 position</button><button data-cmd="M27">M27 progress</button>
+    </div>
+  </section>
+</main>
+<footer class="sub">FlashForge Monitor <span id="ver"></span> · <a href="https://github.com/dougkl/flashforge-monitor">GitHub</a> · <button id="testNotify" class="link">Send test notification</button></footer>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

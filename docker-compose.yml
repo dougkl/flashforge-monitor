@@ -1,0 +1,15 @@
+services:
+  flashforge-monitor:
+    image: ghcr.io/dougkl/flashforge-monitor:latest
+    container_name: flashforge-monitor
+    restart: unless-stopped
+    ports:
+      - "5080:5080"
+    environment:
+      Printer__Host: "192.168.1.50"     # <-- your printer's IP
+      # Printer__CheckCode: ""          # optional, LAN-only mode extras
+      # Monitor__Password: "change-me"  # optional, protects the web UI
+      # Notifications__Webhooks__0__Type: "ntfy"
+      # Notifications__Webhooks__0__Url: "https://ntfy.sh/your-private-topic"
+    volumes:
+      - ./data:/data

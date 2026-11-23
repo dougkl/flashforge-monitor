@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+**/data/
+**/appsettings.local.json
+.git/
+.github/
+docs/
