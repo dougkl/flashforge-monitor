@@ -177,7 +177,9 @@ The **Adventurer 5M** uses the same protocol and should work; the AD5X likely wo
 
 ## How it works
 
-The printer exposes a text G-code protocol on TCP 8899 (`~M601 S1` to take control, `~M105` temps, `~M119` state, `~M27` progress, `~M28/M29` upload, …), an HTTP JSON API on 8898 in LAN-only mode, and an MJPEG stream on 8080. FlashForge Monitor polls status, keeps one control session at a time (the printer doesn't like parallel sessions), and serves a single-page UI.
+The printer exposes a text G-code protocol on TCP 8899 (`~M601 S1` to take control, `~M105` temps, `~M119` state, `~M27` progress, `~M28/M29` upload, …), an HTTP JSON API on 8898 in LAN-only mode, and an MJPEG stream on 8080. FlashForge Monitor keeps **one long-lived, logged-in connection** (newer firmware answers `Control failed` if a client logs in and out every few seconds), polls status over it, and serves a single-page UI.
+
+> **Using a slicer at the same time?** The printer allows one TCP controller at a time. If Orca/FlashPrint can't send a job while the monitor is running, upload through the monitor instead, or use the slicer's LAN-mode (HTTP) connection, which doesn't conflict.
 
 Protocol details come from the excellent MIT-licensed [flashforge-python-api](https://github.com/GhostTypes/ff-5mp-api-py) by GhostTypes.
 

@@ -11,9 +11,17 @@ namespace FlashforgeMonitor;
 /// handles one control session well, so every operation goes through one gate.
 /// Command set based on the MIT-licensed flashforge-python-api by GhostTypes.
 /// </summary>
-public sealed partial class PrinterTcp(IOptionsMonitor<PrinterOptions> options)
+public sealed partial class PrinterTcp(IOptionsMonitor<PrinterOptions> options, ILogger<PrinterTcp> log) : IAsyncDisposable
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    // One long-lived, logged-in connection. Firmware 5.x refuses control ("Control failed")
+    // when clients log in and out every few seconds, so we connect once and keep it open.
+    private TcpClient? _client;
+    private NetworkStream? _stream;
+    private TcpSession? _session;
+    private string? _connectedHost;
+    private DateTimeOffset _busyUntil;
 
     /// <summary>What a long-running operation is doing right now (e.g. "Uploading x.gcode").</summary>
     public string? Activity { get; private set; }
@@ -27,29 +35,16 @@ public sealed partial class PrinterTcp(IOptionsMonitor<PrinterOptions> options)
         else if (!await _gate.WaitAsync(0, ct)) return (false, default);
         try
         {
-            var opt = options.CurrentValue;
-            if (string.IsNullOrWhiteSpace(opt.Host))
-                throw new InvalidOperationException("Printer:Host is not configured.");
-
-            using var client = new TcpClient { NoDelay = true };
-            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-            {
-                cts.CancelAfter(TimeSpan.FromSeconds(4));
-                await client.ConnectAsync(opt.Host, opt.TcpPort, cts.Token);
-            }
-            await using var stream = client.GetStream();
-            var session = new TcpSession(stream);
-            var login = await session.CommandAsync("M601 S1", ct);
-            if (login.Contains("failed", StringComparison.OrdinalIgnoreCase))
-                throw new PrinterBusyException("Printer is busy (homing, leveling, or another app has control). Try again in a moment.");
+            var session = await EnsureConnectedAsync(ct);
             try
             {
                 return (true, await work(session));
             }
-            finally
+            catch (Exception ex) when (ex is IOException or TimeoutException or SocketException or ObjectDisposedException)
             {
-                try { await session.CommandAsync("M602", CancellationToken.None, TimeSpan.FromSeconds(2)); }
-                catch { /* best effort */ }
+                // Connection is in an unknown state: drop it, the next call reconnects.
+                Disconnect(sendLogout: false);
+                throw;
             }
         }
         finally
@@ -58,6 +53,75 @@ public sealed partial class PrinterTcp(IOptionsMonitor<PrinterOptions> options)
             ActivityPercent = null;
             _gate.Release();
         }
+    }
+
+    private async Task<TcpSession> EnsureConnectedAsync(CancellationToken ct)
+    {
+        var opt = options.CurrentValue;
+        if (string.IsNullOrWhiteSpace(opt.Host))
+            throw new InvalidOperationException("Printer:Host is not configured.");
+
+        if (_session is not null && _client is { Connected: true } && _connectedHost == $"{opt.Host}:{opt.TcpPort}")
+            return _session;
+
+        Disconnect(sendLogout: true);
+        if (DateTimeOffset.Now < _busyUntil)
+            throw new PrinterBusyException("Printer is busy (another app has control, or it's homing). Retrying shortly.");
+
+        var client = new TcpClient { NoDelay = true };
+        try
+        {
+            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                cts.CancelAfter(TimeSpan.FromSeconds(4));
+                await client.ConnectAsync(opt.Host, opt.TcpPort, cts.Token);
+            }
+            client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            var stream = client.GetStream();
+            var session = new TcpSession(stream);
+            var login = await session.CommandAsync("M601 S1", ct);
+            if (login.Contains("failed", StringComparison.OrdinalIgnoreCase))
+            {
+                client.Dispose();
+                _busyUntil = DateTimeOffset.Now.AddSeconds(10); // back off instead of hammering the printer
+                throw new PrinterBusyException("Printer is busy (another app has control, or it's homing). Retrying shortly.");
+            }
+            _client = client;
+            _stream = stream;
+            _session = session;
+            _connectedHost = $"{opt.Host}:{opt.TcpPort}";
+            log.LogInformation("Connected to printer at {Host}", _connectedHost);
+            return session;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+    }
+
+    private void Disconnect(bool sendLogout)
+    {
+        if (_client is null) return;
+        if (sendLogout && _session is not null)
+        {
+            try { _session.CommandAsync("M602", CancellationToken.None, TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(); }
+            catch { /* best effort */ }
+        }
+        try { _stream?.Dispose(); } catch { }
+        try { _client.Dispose(); } catch { }
+        _client = null;
+        _stream = null;
+        _session = null;
+        _connectedHost = null;
+    }
+
+    /// <summary>Logs out cleanly on shutdown so the printer frees its control slot for other apps.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        await _gate.WaitAsync();
+        try { Disconnect(sendLogout: true); }
+        finally { _gate.Release(); }
     }
 
     public async Task<string> RunAsync(string command, CancellationToken ct)
@@ -241,6 +305,10 @@ public sealed class TcpSession(NetworkStream stream)
     /// </summary>
     public async Task<byte[]> RawAsync(string cmd, CancellationToken ct, TimeSpan timeout, bool untilIdle)
     {
+        // On a long-lived connection, throw away anything left over from an earlier reply.
+        var scratch = new byte[4096];
+        while (stream.DataAvailable) _ = await stream.ReadAsync(scratch, ct);
+
         var bytes = Encoding.ASCII.GetBytes($"~{cmd}\r\n");
         await stream.WriteAsync(bytes, ct);
 
