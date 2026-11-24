@@ -33,6 +33,8 @@ public sealed record PrinterStatus
     public DateTimeOffset? EstimatedFinish { get; init; }
     public string? Activity { get; init; }
     public int? ActivityPercent { get; init; }
+    public string? Host { get; init; }
+    public string? MoveMode { get; init; }
 }
 
 /// <summary>Polls the printer, keeps temperature history, and raises print events.</summary>
@@ -49,6 +51,7 @@ public sealed partial class PrinterMonitor(
     private int _failures;
     private bool _announcedOffline;
     private PrinterStatus? _lastOnline;
+    private string? _infoHost;
 
     // current job tracking
     private string? _jobFile;
@@ -89,7 +92,7 @@ public sealed partial class PrinterMonitor(
             catch (Exception ex)
             {
                 _failures++;
-                Latest = Latest with { Online = false, State = "offline", Error = ex.Message, UpdatedAt = DateTimeOffset.Now };
+                Latest = Latest with { Online = false, State = "offline", Error = ex.Message, UpdatedAt = DateTimeOffset.Now, Host = options.CurrentValue.Host };
                 if (_failures == 1) log.LogWarning("Printer unreachable: {Message}", ex.Message);
                 if (_failures >= 5 && !_announcedOffline)
                 {
@@ -181,6 +184,7 @@ public sealed partial class PrinterMonitor(
 
     private async Task<PrinterStatus> PollAsync(TcpSession s, CancellationToken ct)
     {
+        if (_infoHost != options.CurrentValue.Host) { _info = null; _infoHost = options.CurrentValue.Host; }
         if (_info is null)
         {
             var m115 = await s.CommandAsync("M115", ct);
@@ -220,6 +224,8 @@ public sealed partial class PrinterMonitor(
             Serial = _info?.Sn,
             State = state,
             MachineStatus = machine,
+            MoveMode = Field(m119, "MoveMode"),
+            Host = options.CurrentValue.Host,
             CurrentFile = string.IsNullOrWhiteSpace(file) ? null : file,
             LedOn = Field(m119, "LED") switch { "1" => true, "0" => false, _ => null },
             NozzleTemp = t.Success ? D(t.Groups[1].Value) : null,

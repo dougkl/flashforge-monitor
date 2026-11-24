@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const fmt = (v, d = 1) => v == null ? '–' : Number(v).toFixed(d);
 const clock = t => t ? new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
 const dur = s => s == null ? '–' : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 60)}m ${s % 60}s`;
-let last = {}, lan = false, step = 10;
+let last = {}, lan = false, step = 10, lastDetail = null, thumbFor = null;
 
 // ---------- helpers ----------
 function toast(msg, err = false) {
@@ -64,6 +64,8 @@ async function tick() {
   if (s.printStartedAt) bits.push('started ' + clock(s.printStartedAt));
   if (s.estimatedFinish) bits.push('ETA ~' + clock(s.estimatedFinish));
   $('eta').textContent = bits.join(' · ');
+  $('ipBtn').textContent = s.host ? s.host : 'set printer IP';
+  renderJob(s);
   document.querySelector('[data-job=pause]').disabled = s.state !== 'printing';
   document.querySelector('[data-job=resume]').disabled = s.state !== 'paused';
   document.querySelector('[data-job=cancel]').disabled = !active;
@@ -103,7 +105,7 @@ async function loadDetail() {
     box.innerHTML = ''; const d = document.createElement('div');
     d.textContent = (r && r.message) || 'No data'; box.append(d); return;
   }
-  const d = r.detail; box.innerHTML = '';
+  const d = r.detail; lastDetail = d; box.innerHTML = '';
   const shown = new Set();
   const add = (k, label, f) => {
     if (d[k] === undefined || d[k] === null || d[k] === '') return;
@@ -272,9 +274,149 @@ async function chart() {
 
 $('testNotify').onclick = () => api('api/notify/test');
 
+// ---------- job details ----------
+// Slicer time often sits in the file name, e.g. "Boat_PLA_14m3s.gcode" or "part_1h2m.3mf".
+function slicerEstimate(name) {
+  const m = /(?:^|[_\- ])(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?(?=\.[^.]+$)/i.exec(name || '');
+  if (!m || !(m[1] || m[2] || m[3] || m[4])) return null;
+  return (+(m[1] || 0)) * 86400 + (+(m[2] || 0)) * 3600 + (+(m[3] || 0)) * 60 + (+(m[4] || 0));
+}
+function renderJob(s) {
+  const active = s.state === 'printing' || s.state === 'paused' || s.state === 'completed';
+  const file = active ? s.currentFile : null;
+
+  // thumbnail of the file being printed (fetched once per file)
+  const img = $('jobThumb');
+  if (file !== thumbFor) {
+    thumbFor = file;
+    img.hidden = true;
+    if (file) {
+      img.onload = () => img.hidden = false;
+      img.onerror = () => img.hidden = true;
+      img.src = 'api/thumb?name=' + encodeURIComponent(file);
+    }
+  }
+
+  const rows = [];
+  if (active) {
+    const now = Date.now();
+    if (s.printStartedAt) rows.push(['Elapsed', dur(Math.round((now - new Date(s.printStartedAt)) / 1000))]);
+    const d = lan ? lastDetail : null;
+    if (d) {
+      if (d.printDuration != null) rows.push(['Print time', dur(d.printDuration)]);
+      if (d.estimatedTime != null) {
+        rows.push(['Time left', dur(Math.round(d.estimatedTime))]);
+        rows.push(['Finishes', clock(now + d.estimatedTime * 1000)]);
+      }
+      if (d.estimatedRightWeight != null) rows.push(['Filament', fmt(d.estimatedRightWeight) + ' g']);
+      if (d.estimatedRightLen != null) rows.push(['Length', fmt(d.estimatedRightLen / 1000, 2) + ' m']);
+      if (d.currentPrintSpeed != null) rows.push(['Head speed', d.currentPrintSpeed + ' mm/s']);
+      if (d.printSpeedAdjust != null) rows.push(['Speed', d.printSpeedAdjust + '%']);
+      if (d.coolingFanSpeed != null) rows.push(['Part fan', d.coolingFanSpeed + '%']);
+      if (d.chamberTemp != null) rows.push(['Chamber', fmt(d.chamberTemp) + '°']);
+      if (d.zAxisCompensation != null) rows.push(['Z offset', fmt(d.zAxisCompensation, 3) + ' mm']);
+      if (d.rightFilamentType) rows.push(['Material', d.rightFilamentType]);
+    }
+    const est = slicerEstimate(file);
+    if (est) {
+      rows.push(['Slicer estimate', dur(est)]);
+      if (!d && s.printStartedAt) rows.push(['Finishes (slicer)', clock(new Date(s.printStartedAt).getTime() + est * 1000)]);
+    }
+    if (s.state === 'printing' && s.layer === 0 && (s.moveMode === 'HOMING' || (s.progress ?? 0) === 0))
+      rows.push(['Phase', s.moveMode === 'HOMING' ? 'homing' : 'preparing (heating / leveling)']);
+  }
+  const box = $('jobInfo'); box.innerHTML = '';
+  for (const [k, v] of rows) {
+    const row = document.createElement('div');
+    const a = document.createElement('span'); a.textContent = k;
+    const b = document.createElement('span'); b.textContent = v;
+    row.append(a, b); box.append(row);
+  }
+}
+
+// ---------- settings ----------
+const EVENTS = ['started', 'finished', 'cancelled', 'paused', 'resumed', 'offline', 'online'];
+function hookRow(h = { type: 'ntfy', url: '', events: [] }) {
+  const row = document.createElement('div'); row.className = 'hook';
+  const sel = document.createElement('select');
+  for (const t of ['ntfy', 'discord', 'json']) { const o = document.createElement('option'); o.value = t; o.textContent = t; sel.append(o); }
+  sel.value = (h.type || 'json').toLowerCase();
+  const url = document.createElement('input'); url.placeholder = 'https://ntfy.sh/your-topic'; url.value = h.url || '';
+  url.dataset.events = (h.events || []).join(',');
+  const del = document.createElement('button'); del.type = 'button'; del.textContent = '✕'; del.onclick = () => row.remove();
+  row.append(sel, url, del);
+  return row;
+}
+async function openSettings() {
+  const s = await getJson('api/settings');
+  $('sHost').value = s.host || '';
+  $('sCode').value = ''; $('sCode').placeholder = s.hasCheckCode ? '•••••• saved (leave empty to keep)' : 'not set';
+  $('sPoll').value = s.pollSeconds;
+  $('sUser').value = s.username || 'admin';
+  $('sPass').value = '';
+  $('sPassState').textContent = s.hasPassword ? 'A password is set. Leave empty to keep it.' : 'No password: anyone on your network can open this page.';
+  $('sHooks').innerHTML = '';
+  for (const h of s.webhooks || []) $('sHooks').append(hookRow(h));
+  $('sFile').textContent = 'Saved to ' + s.settingsFile;
+  $('sFound').innerHTML = '';
+  $('sTestResult').textContent = 'Find it on the printer screen: Settings → Network. Give it a fixed IP in your router.';
+  $('sTestResult').className = 'sub';
+  $('settings').showModal();
+}
+$('settingsBtn').onclick = openSettings;
+$('ipBtn').onclick = openSettings;
+$('setupLink').onclick = openSettings;
+$('sAddHook').onclick = () => $('sHooks').append(hookRow());
+$('sClearCode').onclick = async () => {
+  await api('api/settings', { checkCode: '' }, 'PUT');
+  $('sCode').placeholder = 'not set'; loadConfig();
+};
+$('sTest').onclick = async () => {
+  const host = $('sHost').value.trim(); if (!host) return;
+  $('sTestResult').textContent = 'Testing…'; $('sTestResult').className = 'sub';
+  const r = await (await fetch('api/settings/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host }) })).json();
+  $('sTestResult').textContent = r.message; $('sTestResult').className = 'sub ' + (r.ok ? 'ok' : 'bad');
+};
+$('sFind').onclick = async () => {
+  const ul = $('sFound'); ul.innerHTML = '<li class="sub">Searching the local network…</li>';
+  const list = await (await fetch('api/discover', { method: 'POST' })).json().catch(() => []);
+  ul.innerHTML = '';
+  if (!list.length) {
+    const li = document.createElement('li'); li.className = 'sub';
+    li.textContent = 'No printers answered. Discovery only works on the same network/VLAN; type the IP instead.';
+    ul.append(li); return;
+  }
+  for (const p of list) {
+    const li = document.createElement('li');
+    const t = document.createElement('span'); t.textContent = `${p.name || p.model} · ${p.model} · ${p.ip} · ${p.status}`;
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Use';
+    b.onclick = () => { $('sHost').value = p.ip; ul.innerHTML = ''; };
+    li.append(t, b); ul.append(li);
+  }
+};
+$('settingsForm').onsubmit = async e => {
+  if (e.submitter && e.submitter.value === 'cancel') return; // Close
+  e.preventDefault();
+  const body = {
+    host: $('sHost').value.trim(),
+    pollSeconds: +$('sPoll').value || 3,
+    username: $('sUser').value.trim() || 'admin',
+    webhooks: [...$('sHooks').querySelectorAll('.hook')].map(r => ({
+      type: r.querySelector('select').value,
+      url: r.querySelector('input').value.trim(),
+      events: (r.querySelector('input').dataset.events || '').split(',').filter(Boolean),
+    })),
+  };
+  if ($('sCode').value.trim()) body.checkCode = $('sCode').value.trim();
+  if ($('sPass').value) body.password = $('sPass').value;
+  const r = await api('api/settings', body, 'PUT');
+  if (r && r.ok) { $('settings').close(); thumbFor = undefined; await loadConfig(); tick(); loadFiles(); }
+};
+
 // ---------- start ----------
 (async () => {
   await loadConfig();
+  if ($('setupBanner').hidden === false) openSettings(); // first run: go straight to settings
   startCamera(); tick(); chart(); loadFiles(); loadHistory(); loadDetail();
   setInterval(tick, 2000);
   setInterval(chart, 10000);

@@ -76,7 +76,15 @@ dotnet run -- --Printer:Host=192.168.1.50      # needs the .NET 10 SDK
 
 ## Configuration
 
-Settings can go in `appsettings.local.json` next to the executable (never committed, see below), as environment variables (`Section__Key`), or as command-line arguments (`--Section:Key=value`).
+**Easiest: click ⚙ Settings in the web UI.** On first start it opens automatically. You can:
+
+- type the printer's IP and hit **Test** (checks the control, camera and API ports), or hit **Find** to discover printers on the same network
+- add the **access code** for full job details
+- set a login password and notification webhooks
+
+The current printer address is always shown in the header; click it to change. UI settings are saved to `data/settings.json` and take priority over everything else; changes apply immediately, no restart.
+
+You can also configure it in `appsettings.local.json` next to the executable (never committed), with environment variables (`Section__Key`), or with command-line arguments (`--Section:Key=value`). That's handy for Docker and automated installs.
 
 ```json
 {
@@ -110,9 +118,18 @@ Settings can go in `appsettings.local.json` next to the executable (never commit
 
 Changes to `appsettings.local.json` are picked up without a restart. Use **Send test notification** at the bottom of the page to check webhooks.
 
-### LAN-only mode (optional)
+### Access code (optional)
 
-On the printer: **Settings → Network → LAN-only mode**. It shows a **check code**; put it in `Printer:CheckCode`. This unlocks the "Printer details" panel and the extra controls. Everything else works without it.
+The printer's HTTP API (port 8898) gives much richer job data: time left, print duration, filament weight/length, head speed, fan speeds, chamber temperature, Z offset, door, lifetime stats. It needs the printer's **access code** (a.k.a. check code), shown on the printer screen under **Settings → Network** (LAN-only mode page). Enter it in ⚙ Settings.
+
+- Firmware **5.x**: the HTTP API is always on; you just need the code (without it the printer answers "Access code is different").
+- Firmware **3.x**: LAN-only mode must be enabled for the HTTP API to answer.
+
+Everything else works without the code.
+
+### Job details
+
+The Job card shows the file's thumbnail, progress, layer, elapsed time and an ETA from the observed progress rate. If the file name contains the slicer time (e.g. `Boat_PLA_14m3s.gcode`) it's used as a second estimate. With the access code you also get the printer's own time-left, filament usage, speeds and fans. While a print is warming up or homing, the card shows the phase.
 
 ## Network tips
 
@@ -167,6 +184,9 @@ All endpoints return JSON; `POST` bodies are JSON.
 | POST | `/api/console` `{ "command": "M115" }` | Raw command |
 | POST | `/api/lan/camera-on` · `camera-off` · `clear-platform` · `filter-internal` · `filter-external` · `filter-off` | LAN-mode controls |
 | GET | `/camera` | MJPEG camera stream |
+| GET · PUT | `/api/settings` | Read / change settings (host, checkCode, pollSeconds, username, password, webhooks) |
+| POST | `/api/settings/test` `{ "host": "192.168.1.50" }` | Check which printer ports answer |
+| POST | `/api/discover` | Find printers on the local network (UDP broadcast) |
 | GET | `/healthz` | Health check (no auth) |
 
 ## Supported printers

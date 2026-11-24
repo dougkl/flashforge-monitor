@@ -15,11 +15,53 @@
   <span id="state" class="pill">…</span>
   <span id="activity" class="pill" hidden></span>
   <span class="meta" id="meta"></span>
+  <button id="ipBtn" class="ipchip" title="Printer address: click to change">–</button>
+  <button id="settingsBtn" title="Settings">⚙ Settings</button>
 </header>
 <div class="banner" id="setupBanner" hidden>
-  No printer configured. Set <code>Printer:Host</code> in <code>appsettings.local.json</code>
-  or start with <code>FFM_Printer__Host=&lt;printer-ip&gt;</code>.
+  No printer set up yet. <button class="link" id="setupLink">Open settings</button> to enter your printer's IP address or find it on your network.
 </div>
+
+<!-- Settings dialog -->
+<dialog id="settings">
+  <form method="dialog" id="settingsForm">
+    <h3>Settings</h3>
+
+    <fieldset>
+      <legend>Printer</legend>
+      <label>IP address or hostname
+        <div class="setrow"><input id="sHost" placeholder="e.g. 192.168.1.50" autocomplete="off"><button type="button" id="sTest">Test</button><button type="button" id="sFind">Find</button></div>
+      </label>
+      <div class="sub" id="sTestResult">Find it on the printer screen: Settings → Network. Give it a fixed IP in your router.</div>
+      <ul class="found" id="sFound"></ul>
+      <label>Access code <span class="sub">(optional, unlocks full job details: time left, filament, fans, chamber…)</span>
+        <input id="sCode" type="password" placeholder="leave empty to keep current" autocomplete="off">
+      </label>
+      <div class="sub">Shown on the printer screen under Network (LAN mode / check code). <button type="button" class="link" id="sClearCode">Remove saved code</button></div>
+      <label>Refresh every (seconds) <input id="sPoll" type="number" min="1" max="60"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Login (optional)</legend>
+      <div class="two">
+        <label>Username <input id="sUser" autocomplete="off"></label>
+        <label>Password <input id="sPass" type="password" placeholder="leave empty to keep current" autocomplete="new-password"></label>
+      </div>
+      <div class="sub" id="sPassState"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Notifications</legend>
+      <div id="sHooks"></div>
+      <button type="button" id="sAddHook">+ Add webhook</button>
+    </fieldset>
+
+    <div class="row dialogbtns">
+      <span class="sub ellipsis" id="sFile"></span>
+      <span><button value="cancel" formnovalidate>Close</button> <button id="sSave" value="default" class="primary">Save</button></span>
+    </div>
+  </form>
+</dialog>
 
 <main>
   <!-- Camera -->
@@ -33,9 +75,15 @@
   <!-- Job -->
   <section class="card span2">
     <h2>Job</h2>
-    <div class="row"><div class="big" id="pct">–</div><div class="sub right" id="layer"></div></div>
-    <div class="bar"><div id="barfill"></div></div>
-    <div class="row"><span class="sub ellipsis" id="file">No active print</span><span class="sub" id="eta"></span></div>
+    <div class="jobtop">
+      <img id="jobThumb" alt="" hidden>
+      <div class="jobmain">
+        <div class="row"><div class="big" id="pct">–</div><div class="sub right" id="layer"></div></div>
+        <div class="bar"><div id="barfill"></div></div>
+        <div class="row"><span class="sub ellipsis" id="file">No active print</span><span class="sub" id="eta"></span></div>
+      </div>
+    </div>
+    <div class="kv jobkv" id="jobInfo"></div>
     <div class="btns">
       <button data-job="pause">⏸ Pause</button>
       <button data-job="resume">▶ Resume</button>

@@ -16,6 +16,13 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 builder.Configuration.AddJsonFile("appsettings.local.json", optional: true, reloadOnChange: true);
 builder.Configuration.AddEnvironmentVariables("FFM_");
 
+// Settings saved from the web UI win over everything else (incl. env vars), so the UI is always the truth.
+var dataDir = Path.GetFullPath(builder.Configuration["Monitor:DataDirectory"] ?? "data", builder.Environment.ContentRootPath);
+Directory.CreateDirectory(dataDir);
+var settingsPath = Path.Combine(dataDir, "settings.json");
+builder.Configuration.AddJsonFile(settingsPath, optional: true, reloadOnChange: true);
+builder.Services.AddSingleton(new SettingsStore(settingsPath));
+
 builder.Services.Configure<PrinterOptions>(builder.Configuration.GetSection("Printer"));
 builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection("Monitor"));
 builder.Services.Configure<NotificationOptions>(builder.Configuration.GetSection("Notifications"));
@@ -172,6 +179,59 @@ app.MapPost("/api/lan/{action}", async (string action, FlashforgeHttp ff, Cancel
     return Results.Ok(new { ok, message = ok ? "Done" : r["message"]?.ToString() ?? "Failed" });
 });
 
+// ---- settings (web UI) ----
+app.MapGet("/api/settings", (IOptionsMonitor<PrinterOptions> p, IOptionsMonitor<MonitorOptions> m,
+    IOptionsMonitor<NotificationOptions> n, SettingsStore store) => new
+{
+    Host = p.CurrentValue.Host,
+    p.CurrentValue.TcpPort,
+    p.CurrentValue.HttpPort,
+    p.CurrentValue.CameraPort,
+    p.CurrentValue.PollSeconds,
+    HasCheckCode = !string.IsNullOrEmpty(p.CurrentValue.CheckCode),
+    m.CurrentValue.Username,
+    HasPassword = !string.IsNullOrEmpty(m.CurrentValue.Password),
+    Webhooks = n.CurrentValue.Webhooks.Select(w => new { w.Type, w.Url, w.Events }),
+    SettingsFile = store.FilePath,
+});
+
+app.MapPut("/api/settings", async (SettingsUpdate u, SettingsStore store, CancellationToken ct) =>
+{
+    if (u.Host is not null && !string.IsNullOrWhiteSpace(u.Host) &&
+        Uri.CheckHostName(u.Host.Trim()) == UriHostNameType.Unknown)
+        return Results.BadRequest(new { ok = false, message = "That doesn't look like an IP address or hostname." });
+    await store.UpdateAsync(root =>
+    {
+        var printer = SettingsStore.Section(root, "Printer");
+        if (u.Host is not null) printer["Host"] = u.Host.Trim();
+        if (u.CheckCode is not null) printer["CheckCode"] = u.CheckCode.Trim();      // "" clears it
+        if (u.PollSeconds is { } ps) printer["PollSeconds"] = Math.Clamp(ps, 1, 60);
+        var monitor = SettingsStore.Section(root, "Monitor");
+        if (u.Username is not null) monitor["Username"] = u.Username.Trim();
+        if (u.Password is not null) monitor["Password"] = u.Password;                // "" removes the password
+        if (u.Webhooks is not null)
+        {
+            var arr = new JsonArray();
+            foreach (var w in u.Webhooks.Where(w => !string.IsNullOrWhiteSpace(w.Url)))
+                arr.Add(new JsonObject
+                {
+                    ["Type"] = string.IsNullOrWhiteSpace(w.Type) ? "json" : w.Type,
+                    ["Url"] = w.Url.Trim(),
+                    ["Events"] = new JsonArray(w.Events.Select(e => (JsonNode)JsonValue.Create(e)!).ToArray()),
+                });
+            SettingsStore.Section(root, "Notifications")["Webhooks"] = arr;
+        }
+    }, ct);
+    await Task.Delay(600, ct); // let the file watcher reload configuration
+    return Results.Ok(new { ok = true, message = "Settings saved" });
+});
+
+app.MapPost("/api/settings/test", (TestRequest req, IOptionsMonitor<PrinterOptions> o, CancellationToken ct) =>
+    Discovery.TestAsync(req.Host.Trim(), o.CurrentValue.TcpPort, o.CurrentValue.HttpPort, o.CurrentValue.CameraPort, ct));
+
+app.MapPost("/api/discover", async (CancellationToken ct) =>
+    await Discovery.FindAsync(TimeSpan.FromSeconds(3), ct));
+
 // ---- notifications ----
 app.MapPost("/api/notify/test", async (Notifier n, CancellationToken ct) =>
 {
@@ -224,4 +284,8 @@ public sealed record TempRequest(int? Nozzle, int? Bed);
 public sealed record PercentRequest(int Percent);
 public sealed record JogRequest(string Axis, double Distance);
 public sealed record ConsoleRequest(string Command);
+public sealed record TestRequest(string Host);
+public sealed record WebhookUpdate(string Type, string Url, List<string> Events);
+public sealed record SettingsUpdate(
+    string? Host, string? CheckCode, int? PollSeconds, string? Username, string? Password, List<WebhookUpdate>? Webhooks);
 public partial class Program;
