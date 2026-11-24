@@ -22,6 +22,7 @@ public sealed partial class PrinterTcp(IOptionsMonitor<PrinterOptions> options, 
     private TcpSession? _session;
     private string? _connectedHost;
     private DateTimeOffset _busyUntil;
+    private int _timeouts;
 
     /// <summary>What a long-running operation is doing right now (e.g. "Uploading x.gcode").</summary>
     public string? Activity { get; private set; }
@@ -38,11 +39,20 @@ public sealed partial class PrinterTcp(IOptionsMonitor<PrinterOptions> options, 
             var session = await EnsureConnectedAsync(ct);
             try
             {
-                return (true, await work(session));
+                var result = await work(session);
+                _timeouts = 0;
+                return (true, result);
+            }
+            catch (TimeoutException) when (++_timeouts < 3)
+            {
+                // The printer answers slowly while printing. Keep the connection (late replies are
+                // drained before the next command) instead of reconnecting, which gets us locked out.
+                throw;
             }
             catch (Exception ex) when (ex is IOException or TimeoutException or SocketException or ObjectDisposedException)
             {
                 // Connection is in an unknown state: drop it, the next call reconnects.
+                _timeouts = 0;
                 Disconnect(sendLogout: false);
                 throw;
             }
@@ -297,7 +307,7 @@ public sealed class TcpSession(NetworkStream stream)
     public NetworkStream Stream => stream;
 
     public async Task<string> CommandAsync(string cmd, CancellationToken ct, TimeSpan? timeout = null) =>
-        Encoding.Latin1.GetString(await RawAsync(cmd, ct, timeout ?? TimeSpan.FromSeconds(4), untilIdle: false));
+        Encoding.Latin1.GetString(await RawAsync(cmd, ct, timeout ?? TimeSpan.FromSeconds(8), untilIdle: false));
 
     /// <summary>
     /// Sends a command and reads the reply. Text replies end with "ok". Binary replies

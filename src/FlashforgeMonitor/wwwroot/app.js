@@ -164,10 +164,17 @@ document.querySelectorAll('[data-jog]').forEach(b => b.onclick = () => {
 // ---------- camera ----------
 function startCamera() {
   const img = $('camimg');
+  clearTimeout(startCamera.retry);
   img.onload = () => { img.hidden = false; $('camMsg').hidden = true; };
-  img.onerror = () => { img.hidden = true; $('camMsg').hidden = false; };
+  img.onerror = () => {
+    img.hidden = true; $('camMsg').hidden = false;
+    $('camMsg').textContent = 'Camera unavailable, retrying…';
+    startCamera.retry = setTimeout(startCamera, 15000); // keep trying (camera may be busy or off)
+  };
   img.src = 'camera?t=' + Date.now();
 }
+// MJPEG streams can stall silently (Wi-Fi hiccup); reconnect if the tab comes back into view.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) startCamera(); });
 
 // ---------- files ----------
 async function loadFiles() {

@@ -5,26 +5,37 @@ using Microsoft.Extensions.Options;
 
 namespace FlashforgeMonitor;
 
+/// <summary>Serial number learned from the printer (TCP M115), shared with the HTTP client.</summary>
+public sealed class PrinterIdentity
+{
+    public string? Serial { get; set; }
+
+    // Cache of the last /detail payload (singleton; the typed HttpClient itself is transient).
+    public JsonObject? LastDetail { get; set; }
+    public DateTimeOffset LastDetailAt { get; set; }
+}
+
 /// <summary>
-/// Optional client for the Adventurer 5M / 5M Pro local HTTP API (port 8898).
-/// Needs LAN-only mode on the printer and the check code it shows. Adds extra
-/// detail (chamber temp, fans, door, filament, disk) and a few extra controls.
+/// Client for the Adventurer 5M / 5M Pro HTTP API (port 8898). Needs the printer's
+/// access code ("Printer ID" / check code on the Network screen) and its serial number.
+/// On firmware 5.x it works without LAN-only mode; on 3.x LAN-only mode must be on.
 /// Endpoint shapes follow the MIT-licensed flashforge-python-api by GhostTypes.
 /// </summary>
-public sealed class FlashforgeHttp(HttpClient http, IOptionsMonitor<PrinterOptions> options, PrinterMonitor monitor)
+public sealed class FlashforgeHttp(HttpClient http, IOptionsMonitor<PrinterOptions> options, PrinterIdentity identity)
 {
     private PrinterOptions Opt => options.CurrentValue;
     private string Url(string path) => $"http://{Opt.Host}:{Opt.HttpPort}{path}";
-    private string Serial => !string.IsNullOrWhiteSpace(Opt.SerialNumber) ? Opt.SerialNumber : monitor.Latest.Serial ?? "";
 
+    public string Serial => !string.IsNullOrWhiteSpace(Opt.SerialNumber) ? Opt.SerialNumber : identity.Serial ?? "";
     public bool Enabled => !string.IsNullOrWhiteSpace(Opt.CheckCode) && !string.IsNullOrWhiteSpace(Opt.Host);
+    public bool Ready => Enabled && Serial.Length > 0;
 
     private static JsonObject Error(string message) => new() { ["code"] = -1, ["message"] = message };
 
     public async Task<JsonObject> PostAsync(string path, JsonObject? extra, CancellationToken ct)
     {
-        if (!Enabled) return Error("LAN mode not configured (set Printer:CheckCode).");
-        if (string.IsNullOrEmpty(Serial)) return Error("Serial number not known yet.");
+        if (!Enabled) return Error("No access code set (⚙ Settings → Access code).");
+        if (Serial.Length == 0) return Error("Printer serial number not known yet.");
         var body = new JsonObject { ["serialNumber"] = Serial, ["checkCode"] = Opt.CheckCode };
         if (extra is not null)
             foreach (var (k, v) in extra) body[k] = v?.DeepClone();
@@ -41,7 +52,22 @@ public sealed class FlashforgeHttp(HttpClient http, IOptionsMonitor<PrinterOptio
         }
     }
 
-    public Task<JsonObject> DetailAsync(CancellationToken ct) => PostAsync("/detail", null, ct);
+    public async Task<JsonObject> DetailAsync(CancellationToken ct)
+    {
+        var r = await PostAsync("/detail", null, ct);
+        if (r["code"]?.GetValue<int>() == 0 && r["detail"] is JsonObject d)
+        {
+            identity.LastDetail = d;
+            identity.LastDetailAt = DateTimeOffset.Now;
+        }
+        return r;
+    }
+
+    /// <summary>Recent cached detail if fresh, otherwise asks the printer.</summary>
+    public async Task<JsonObject> DetailCachedAsync(CancellationToken ct) =>
+        identity.LastDetail is { } d && DateTimeOffset.Now - identity.LastDetailAt < TimeSpan.FromSeconds(4)
+            ? new JsonObject { ["code"] = 0, ["detail"] = d.DeepClone() }
+            : await DetailAsync(ct);
 
     public Task<JsonObject> ControlAsync(string cmd, object args, CancellationToken ct) =>
         PostAsync("/control", new JsonObject

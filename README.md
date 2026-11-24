@@ -159,7 +159,15 @@ rest:
         unit_of_measurement: "°C"
 ```
 
-Camera: add a **MJPEG IP Camera** with URL `http://<monitor-ip>:5080/camera`.
+Camera: add a **MJPEG IP Camera** with URL `http://<monitor-ip>:5080/camera` (still image: `/camera/snapshot`).
+
+The printer's camera only serves **one viewer at a time**. FlashForge Monitor keeps a single connection to it and shares it with every browser/HA viewer, so point other tools at the monitor's `/camera` instead of the printer directly.
+
+For a full native integration (sensors, buttons, camera, thumbnail) there's also the [FlashForge Home Assistant integration](https://github.com/Parallel-7/ff-5mp-hass). It uses the same access code and works alongside this app.
+
+## Deleting files on the printer
+
+The printer's network protocols don't expose a delete command (list, thumbnail, upload and start only), so files can't be removed remotely yet. Delete them on the printer's touchscreen (file list → select → delete). Free space is shown in the details panel when the access code is set.
 
 ## API
 
@@ -183,7 +191,7 @@ All endpoints return JSON; `POST` bodies are JSON.
 | POST | `/api/control/light/on` · `off`, `/api/control/runout/on` · `off` | Light, runout sensor |
 | POST | `/api/console` `{ "command": "M115" }` | Raw command |
 | POST | `/api/lan/camera-on` · `camera-off` · `clear-platform` · `filter-internal` · `filter-external` · `filter-off` | LAN-mode controls |
-| GET | `/camera` | MJPEG camera stream |
+| GET | `/camera` · `/camera/snapshot` | MJPEG stream (shared) · single JPEG |
 | GET · PUT | `/api/settings` | Read / change settings (host, checkCode, pollSeconds, username, password, webhooks) |
 | POST | `/api/settings/test` `{ "host": "192.168.1.50" }` | Check which printer ports answer |
 | POST | `/api/discover` | Find printers on the local network (UDP broadcast) |
@@ -197,7 +205,7 @@ The **Adventurer 5M** uses the same protocol and should work; the AD5X likely wo
 
 ## How it works
 
-The printer exposes a text G-code protocol on TCP 8899 (`~M601 S1` to take control, `~M105` temps, `~M119` state, `~M27` progress, `~M28/M29` upload, …), an HTTP JSON API on 8898 in LAN-only mode, and an MJPEG stream on 8080. FlashForge Monitor keeps **one long-lived, logged-in connection** (newer firmware answers `Control failed` if a client logs in and out every few seconds), polls status over it, and serves a single-page UI.
+The printer exposes a text G-code protocol on TCP 8899 (`~M601 S1` to take control, `~M105` temps, `~M119` state, `~M27` progress, `~M28/M29` upload, …), an HTTP JSON API on 8898 in LAN-only mode, and an MJPEG stream on 8080. With an access code set, **status is read from the HTTP API** (richer, and it never takes the printer's single TCP control slot); TCP is only used for commands and as a fallback. Over TCP, FlashForge Monitor keeps **one long-lived, logged-in connection** (newer firmware answers `Control failed` if a client logs in and out every few seconds), polls status over it, and serves a single-page UI.
 
 > **Using a slicer at the same time?** The printer allows one TCP controller at a time. If Orca/FlashPrint can't send a job while the monitor is running, upload through the monitor instead, or use the slicer's LAN-mode (HTTP) connection, which doesn't conflict.
 

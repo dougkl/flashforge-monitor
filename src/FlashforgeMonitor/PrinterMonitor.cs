@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 
@@ -35,11 +36,16 @@ public sealed record PrinterStatus
     public int? ActivityPercent { get; init; }
     public string? Host { get; init; }
     public string? MoveMode { get; init; }
+    /// <summary>"http" (access code) or "tcp".</summary>
+    public string Source { get; init; } = "tcp";
 }
 
 /// <summary>Polls the printer, keeps temperature history, and raises print events.</summary>
 public sealed partial class PrinterMonitor(
     PrinterTcp tcp,
+    FlashforgeHttp http,
+    PrinterIdentity identity,
+    SettingsStore settings,
     HistoryStore history,
     Notifier notifier,
     IOptionsMonitor<PrinterOptions> options,
@@ -52,6 +58,7 @@ public sealed partial class PrinterMonitor(
     private bool _announcedOffline;
     private PrinterStatus? _lastOnline;
     private string? _infoHost;
+    private bool _httpWarned;
 
     // current job tracking
     private string? _jobFile;
@@ -72,6 +79,15 @@ public sealed partial class PrinterMonitor(
         {
             try
             {
+                // Preferred: the HTTP API (needs access code + serial). Richer, and it doesn't use the
+                // printer's single TCP control slot, so slicers and commands never get locked out.
+                if (http.Ready && await PollHttpAsync(ct) is { } httpStatus)
+                {
+                    await OnStatusAsync(httpStatus, ct);
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.CurrentValue.PollSeconds)), ct);
+                    continue;
+                }
+
                 var (ran, status) = await tcp.SessionAsync(s => PollAsync(s, ct), ct, wait: false);
                 if (!ran)
                 {
@@ -86,12 +102,17 @@ public sealed partial class PrinterMonitor(
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (PrinterBusyException)
             {
-                // Reachable, just refusing control for a moment (e.g. homing at print start).
-                Latest = Latest with { Activity = "Printer busy", UpdatedAt = DateTimeOffset.Now };
+                // Reachable, just refusing control for a moment (e.g. homing at print start, or a stale session).
+                Latest = Latest with { Activity = "Reconnecting…", UpdatedAt = DateTimeOffset.Now };
+            }
+            catch (Exception ex) when (++_failures < 3 && Latest.Online)
+            {
+                // One or two slow/failed polls while printing is normal; keep showing the last good status.
+                Latest = Latest with { Activity = "Printer slow to respond…", UpdatedAt = DateTimeOffset.Now };
+                log.LogDebug("Transient poll failure: {Message}", ex.Message);
             }
             catch (Exception ex)
             {
-                _failures++;
                 Latest = Latest with { Online = false, State = "offline", Error = ex.Message, UpdatedAt = DateTimeOffset.Now, Host = options.CurrentValue.Host };
                 if (_failures == 1) log.LogWarning("Printer unreachable: {Message}", ex.Message);
                 if (_failures >= 5 && !_announcedOffline)
@@ -124,10 +145,11 @@ public sealed partial class PrinterMonitor(
         if (isActive && (_jobFile is null || s.CurrentFile != _jobFile))
         {
             _jobFile = s.CurrentFile;
-            _jobStart = now;
+            _jobStart = s.PrintStartedAt ?? now; // HTTP gives the real start time
             _jobStartProgress = s.Progress ?? 0;
-            _jobSeenFromStart = prev.Online && !wasActive; // false on app start mid-print
-            if (_jobSeenFromStart)
+            var startedWhileWatching = prev.Online && !wasActive; // false when the app starts mid-print
+            _jobSeenFromStart = s.PrintStartedAt is not null || startedWhileWatching;
+            if (startedWhileWatching)
                 await notifier.SendAsync("started", "Print started", s.CurrentFile ?? "Print job", ct);
         }
         if (prev.State == "printing" && s.State == "paused")
@@ -165,11 +187,13 @@ public sealed partial class PrinterMonitor(
             if (elapsed > TimeSpan.FromSeconds(60)) eta = now + elapsed / (p - _jobStartProgress) * (100 - p);
         }
 
-        Latest = s with
-        {
-            PrintStartedAt = isActive && _jobSeenFromStart ? _jobStart : null,
-            EstimatedFinish = eta,
-        };
+        Latest = s.Source == "http"
+            ? s // printer-reported start/finish times
+            : s with
+            {
+                PrintStartedAt = isActive && _jobSeenFromStart ? _jobStart : null,
+                EstimatedFinish = eta,
+            };
         _lastOnline = Latest;
 
         if (s is { NozzleTemp: { } n, BedTemp: { } b })
@@ -189,6 +213,7 @@ public sealed partial class PrinterMonitor(
         {
             var m115 = await s.CommandAsync("M115", ct);
             _info = (Field(m115, "Machine Type"), Field(m115, "Firmware"), Field(m115, "SN"));
+            await RememberSerialAsync(_info.Value.Sn, ct);
         }
         var m105 = await s.CommandAsync("M105", ct);
         var m119 = await s.CommandAsync("M119", ct);
@@ -238,6 +263,85 @@ public sealed partial class PrinterMonitor(
             X = pos.Success ? D(pos.Groups[1].Value) : null,
             Y = pos.Success ? D(pos.Groups[2].Value) : null,
             Z = pos.Success ? D(pos.Groups[3].Value) : null,
+        };
+    }
+
+    /// <summary>The HTTP API needs the serial; save it so HTTP works right after a restart without TCP.</summary>
+    private async Task RememberSerialAsync(string? sn, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sn)) return;
+        identity.Serial = sn;
+        if (string.IsNullOrWhiteSpace(options.CurrentValue.SerialNumber))
+        {
+            try { await settings.UpdateAsync(r => SettingsStore.Section(r, "Printer")["SerialNumber"] = sn, ct); }
+            catch (Exception ex) { log.LogDebug("Could not save serial: {Message}", ex.Message); }
+        }
+    }
+
+    private async Task<PrinterStatus?> PollHttpAsync(CancellationToken ct)
+    {
+        var r = await http.DetailAsync(ct);
+        if (r["code"]?.GetValue<int>() != 0 || r["detail"] is not JsonObject d)
+        {
+            if (!_httpWarned) log.LogWarning("HTTP API: {Message} (falling back to TCP)", r["message"]?.ToString());
+            _httpWarned = true;
+            return null;
+        }
+        _httpWarned = false;
+
+        static double? Num(JsonObject d, string k) =>
+            d[k] is JsonValue v && v.TryGetValue<double>(out var x) ? x : null;
+        static string? Str(JsonObject d, string k) => d[k]?.ToString();
+
+        var raw = (Str(d, "status") ?? "").ToLowerInvariant();
+        var state = raw switch
+        {
+            "printing" => "printing",
+            "pausing" or "paused" or "pause" => "paused",
+            "completed" or "complete" => "completed",
+            "ready" or "idle" => "idle",
+            "error" => "error",
+            "" => "unknown",
+            _ => "busy", // heating, calibrating, cancelling, busy…
+        };
+        var pid = (int?)Num(d, "pid");
+        var model = pid switch
+        {
+            0x23 => "Flashforge Adventurer 5M",
+            0x24 => "Flashforge Adventurer 5M Pro",
+            0x26 => "Flashforge AD5X",
+            _ => _info?.Model ?? "Flashforge printer",
+        };
+        var now = DateTimeOffset.Now;
+        var file = Str(d, "printFileName");
+        var active = state is "printing" or "paused";
+        var progress = Num(d, "printProgress") is { } p ? (int?)Math.Round(p * 100) : null;
+        var left = Num(d, "estimatedTime");
+        var elapsed = Num(d, "printDuration");
+
+        return new PrinterStatus
+        {
+            Online = true,
+            UpdatedAt = now,
+            Model = model,
+            Firmware = Str(d, "firmwareVersion") is { } fw ? "v" + fw.TrimStart('v') : _info?.Fw,
+            Serial = http.Serial,
+            Host = options.CurrentValue.Host,
+            State = state,
+            MachineStatus = raw.ToUpperInvariant(),
+            CurrentFile = active || state == "completed" ? file : null,
+            LedOn = Str(d, "lightStatus") is { } l ? l == "open" : null,
+            NozzleTemp = Num(d, "rightTemp"),
+            NozzleTarget = Num(d, "rightTargetTemp"),
+            BedTemp = Num(d, "platTemp"),
+            BedTarget = Num(d, "platTargetTemp"),
+            Progress = progress,
+            Layer = (int?)Num(d, "printLayer"),
+            LayerTotal = (int?)Num(d, "targetPrintLayer"),
+            // The printer's own numbers beat our estimate.
+            PrintStartedAt = active && elapsed is { } e ? now.AddSeconds(-e) : null,
+            EstimatedFinish = active && left is { } t && t > 0 ? now.AddSeconds(t) : null,
+            Source = "http",
         };
     }
 

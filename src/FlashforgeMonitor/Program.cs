@@ -28,6 +28,8 @@ builder.Services.Configure<MonitorOptions>(builder.Configuration.GetSection("Mon
 builder.Services.Configure<NotificationOptions>(builder.Configuration.GetSection("Notifications"));
 
 builder.Services.AddSingleton<PrinterTcp>();
+builder.Services.AddSingleton<CameraHub>();
+builder.Services.AddSingleton<PrinterIdentity>();
 builder.Services.AddSingleton<HistoryStore>();
 builder.Services.AddSingleton<Notifier>();
 builder.Services.AddSingleton<PrinterMonitor>();
@@ -90,7 +92,7 @@ app.MapGet("/api/config", (IOptionsMonitor<PrinterOptions> o, FlashforgeHttp ff)
     LanMode = ff.Enabled,
     Version = typeof(Program).Assembly.GetName().Version?.ToString(3),
 });
-app.MapGet("/api/detail", async (FlashforgeHttp ff, CancellationToken ct) => await ff.DetailAsync(ct));
+app.MapGet("/api/detail", async (FlashforgeHttp ff, CancellationToken ct) => await ff.DetailCachedAsync(ct));
 
 // ---- history ----
 app.MapGet("/api/history", async (HistoryStore h, CancellationToken ct) => await h.GetAsync(ct));
@@ -239,26 +241,51 @@ app.MapPost("/api/notify/test", async (Notifier n, CancellationToken ct) =>
     return Results.Ok(new { ok = true, message = "Test sent to all configured webhooks" });
 });
 
-// ---- camera: proxy the MJPEG stream so any browser that can reach this app can see it ----
-app.MapGet("/camera", async (HttpContext ctx, IHttpClientFactory f, IOptionsMonitor<PrinterOptions> o) =>
+// ---- camera: one shared upstream connection (the printer allows a single viewer), fanned out to everyone ----
+app.MapGet("/camera", async (HttpContext ctx, CameraHub hub) =>
 {
-    var opt = o.CurrentValue;
+    var (reader, unsubscribe) = hub.Subscribe();
     try
     {
-        using var upstream = await f.CreateClient("camera").GetAsync(
-            $"http://{opt.Host}:{opt.CameraPort}/?action=stream",
-            HttpCompletionOption.ResponseHeadersRead, ctx.RequestAborted);
-        ctx.Response.StatusCode = (int)upstream.StatusCode;
-        ctx.Response.ContentType = upstream.Content.Headers.ContentType?.ToString() ?? "multipart/x-mixed-replace";
-        ctx.Response.Headers.CacheControl = "no-cache";
-        await using var s = await upstream.Content.ReadAsStreamAsync(ctx.RequestAborted);
-        await s.CopyToAsync(ctx.Response.Body, ctx.RequestAborted);
+        // Wait for the first frame before committing to a 200, so <img onerror> works when the camera is off.
+        using var first = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+        first.CancelAfter(TimeSpan.FromSeconds(10));
+        byte[] frame;
+        try { frame = await reader.ReadAsync(first.Token); }
+        catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
+            await ctx.Response.WriteAsync($"Camera unavailable: {hub.LastError ?? "no frames"}");
+            return;
+        }
+
+        const string boundary = "ffmframe";
+        ctx.Response.ContentType = $"multipart/x-mixed-replace; boundary={boundary}";
+        ctx.Response.Headers.CacheControl = "no-cache, no-store";
+        var body = ctx.Response.Body;
+        while (true)
+        {
+            var header = System.Text.Encoding.ASCII.GetBytes(
+                $"--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
+            await body.WriteAsync(header, ctx.RequestAborted);
+            await body.WriteAsync(frame, ctx.RequestAborted);
+            await body.WriteAsync("\r\n"u8.ToArray(), ctx.RequestAborted);
+            await body.FlushAsync(ctx.RequestAborted);
+            frame = await reader.ReadAsync(ctx.RequestAborted);
+        }
     }
     catch (OperationCanceledException) { }
-    catch (HttpRequestException)
-    {
-        if (!ctx.Response.HasStarted) ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
-    }
+    catch (System.Threading.Channels.ChannelClosedException) { }
+    catch (IOException) { }
+    finally { unsubscribe(); }
+});
+
+app.MapGet("/camera/snapshot", async (CameraHub hub, CancellationToken ct) =>
+{
+    var jpg = await hub.SnapshotAsync(ct);
+    return jpg is null
+        ? Results.Problem($"Camera unavailable: {hub.LastError ?? "no frames"}", statusCode: 502)
+        : Results.File(jpg, "image/jpeg");
 });
 
 app.Run();

@@ -7,7 +7,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>flashforge-monitor</AssemblyName>
     <RootNamespace>FlashforgeMonitor</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <!-- Single-file, self-contained publish (used by the release workflow) -->
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
