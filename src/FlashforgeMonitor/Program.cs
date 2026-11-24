@@ -103,11 +103,32 @@ app.MapDelete("/api/history", async (HistoryStore h, CancellationToken ct) =>
 });
 
 // ---- files ----
-app.MapGet("/api/files", (PrinterTcp p, CancellationToken ct) => Run(() => p.ListFilesAsync(ct)));
-app.MapGet("/api/thumb", async (string name, PrinterTcp p, CancellationToken ct) =>
+// Prefer the HTTP API (no TCP control slot needed); fall back to TCP M661/M662.
+app.MapGet("/api/files", async (PrinterTcp p, FlashforgeHttp ff, CancellationToken ct) =>
+{
+    if (ff.Ready)
+    {
+        var r = await ff.PostAsync("/gcodeList", null, ct);
+        if (r["code"]?.GetValue<int>() == 0)
+        {
+            var list = (r["gcodeListDetail"] ?? r["gcodeList"]) as JsonArray ?? [];
+            return Results.Ok(list.Select(x => x is JsonObject o ? o["gcodeFileName"]?.ToString() : x?.ToString())
+                .Where(n => !string.IsNullOrEmpty(n)).ToList());
+        }
+    }
+    return await Run(() => p.ListFilesAsync(ct));
+});
+app.MapGet("/api/thumb", async (string name, PrinterTcp p, FlashforgeHttp ff, CancellationToken ct) =>
 {
     try
     {
+        if (ff.Ready)
+        {
+            var r = await ff.PostAsync("/gcodeThumb", new JsonObject { ["fileName"] = name }, ct);
+            if (r["code"]?.GetValue<int>() == 0 && r["imageData"]?.ToString() is { Length: > 0 } b64)
+                return Results.File(Convert.FromBase64String(b64), "image/png");
+            if (r["code"]?.GetValue<int>() == 0) return Results.NotFound();
+        }
         var png = await p.ThumbnailAsync(name, ct);
         return png is null ? Results.NotFound() : Results.File(png, "image/png");
     }
@@ -183,9 +204,10 @@ app.MapPost("/api/lan/{action}", async (string action, FlashforgeHttp ff, Cancel
 
 // ---- settings (web UI) ----
 app.MapGet("/api/settings", (IOptionsMonitor<PrinterOptions> p, IOptionsMonitor<MonitorOptions> m,
-    IOptionsMonitor<NotificationOptions> n, SettingsStore store) => new
+    IOptionsMonitor<NotificationOptions> n, SettingsStore store, PrinterIdentity id) => new
 {
     Host = p.CurrentValue.Host,
+    SerialNumber = !string.IsNullOrWhiteSpace(p.CurrentValue.SerialNumber) ? p.CurrentValue.SerialNumber : id.Serial,
     p.CurrentValue.TcpPort,
     p.CurrentValue.HttpPort,
     p.CurrentValue.CameraPort,
@@ -207,6 +229,7 @@ app.MapPut("/api/settings", async (SettingsUpdate u, SettingsStore store, Cancel
         var printer = SettingsStore.Section(root, "Printer");
         if (u.Host is not null) printer["Host"] = u.Host.Trim();
         if (u.CheckCode is not null) printer["CheckCode"] = u.CheckCode.Trim();      // "" clears it
+        if (u.SerialNumber is not null) printer["SerialNumber"] = u.SerialNumber.Trim(); // "" = auto-detect
         if (u.PollSeconds is { } ps) printer["PollSeconds"] = Math.Clamp(ps, 1, 60);
         var monitor = SettingsStore.Section(root, "Monitor");
         if (u.Username is not null) monitor["Username"] = u.Username.Trim();
@@ -314,5 +337,6 @@ public sealed record ConsoleRequest(string Command);
 public sealed record TestRequest(string Host);
 public sealed record WebhookUpdate(string Type, string Url, List<string> Events);
 public sealed record SettingsUpdate(
-    string? Host, string? CheckCode, int? PollSeconds, string? Username, string? Password, List<WebhookUpdate>? Webhooks);
+    string? Host, string? CheckCode, int? PollSeconds, string? Username, string? Password, List<WebhookUpdate>? Webhooks,
+    string? SerialNumber = null);
 public partial class Program;

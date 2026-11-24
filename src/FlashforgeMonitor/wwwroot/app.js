@@ -106,6 +106,7 @@ async function loadDetail() {
     d.textContent = (r && r.message) || 'No data'; box.append(d); return;
   }
   const d = r.detail; lastDetail = d; box.innerHTML = '';
+  $('filesFree').textContent = d.remainingDiskSpace != null ? `${fmt(d.remainingDiskSpace, 2)} GB free` : '';
   const shown = new Set();
   const add = (k, label, f) => {
     if (d[k] === undefined || d[k] === null || d[k] === '') return;
@@ -358,6 +359,7 @@ async function openSettings() {
   const s = await getJson('api/settings');
   $('sHost').value = s.host || '';
   $('sCode').value = ''; $('sCode').placeholder = s.hasCheckCode ? '•••••• saved (leave empty to keep)' : 'not set';
+  $('sSerial').value = s.serialNumber || '';
   $('sPoll').value = s.pollSeconds;
   $('sUser').value = s.username || 'admin';
   $('sPass').value = '';
@@ -415,6 +417,7 @@ $('settingsForm').onsubmit = async e => {
     })),
   };
   if ($('sCode').value.trim()) body.checkCode = $('sCode').value.trim();
+  body.serialNumber = $('sSerial').value.trim();
   if ($('sPass').value) body.password = $('sPass').value;
   const r = await api('api/settings', body, 'PUT');
   if (r && r.ok) { $('settings').close(); thumbFor = undefined; await loadConfig(); tick(); loadFiles(); }

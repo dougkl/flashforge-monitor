@@ -34,10 +34,15 @@
       </label>
       <div class="sub" id="sTestResult">Find it on the printer screen: Settings → Network. Give it a fixed IP in your router.</div>
       <ul class="found" id="sFound"></ul>
-      <label>Access code <span class="sub">(optional, unlocks full job details: time left, filament, fans, chamber…)</span>
-        <input id="sCode" type="password" placeholder="leave empty to keep current" autocomplete="off">
-      </label>
-      <div class="sub">Shown on the printer screen under Network (LAN mode / check code). <button type="button" class="link" id="sClearCode">Remove saved code</button></div>
+      <div class="two">
+        <label>Printer ID <span class="sub">(access code)</span>
+          <input id="sCode" type="password" placeholder="leave empty to keep current" autocomplete="off">
+        </label>
+        <label>Serial number <span class="sub">(auto-detected)</span>
+          <input id="sSerial" placeholder="detected automatically" autocomplete="off">
+        </label>
+      </div>
+      <div class="sub">Printer screen → <b>Settings → Network → LAN Only</b> page shows the <b>Printer ID</b> (e.g. 1a2b3c4d). It unlocks full job details (time left, filament, fans, chamber) and lets status work without tying up the printer. <button type="button" class="link" id="sClearCode">Remove saved Printer ID</button></div>
       <label>Refresh every (seconds) <input id="sPoll" type="number" min="1" max="60"></label>
     </fieldset>
 
@@ -177,7 +182,7 @@
   </section>
 
   <section class="card span2">
-    <h2>Files on printer <button id="refreshFiles">Refresh</button></h2>
+    <h2>Files on printer <span><span class="sub" id="filesFree"></span> <button id="refreshFiles">Refresh</button></span></h2>
     <ul class="files" id="files"><li class="sub">–</li></ul>
   </section>
 
